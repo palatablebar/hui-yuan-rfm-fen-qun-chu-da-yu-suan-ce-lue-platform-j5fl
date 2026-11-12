@@ -7,8 +7,10 @@
           <th>姓名</th>
           <th>门店</th>
           <th class="num">R 天数</th>
-          <th class="num">F 次数</th>
-          <th class="num">M 累计</th>
+          <th class="num">F 有效单</th>
+          <th v-if="showCorrection" class="num">原累计</th>
+          <th v-if="showCorrection" class="num">退款冲减</th>
+          <th class="num">净 M 累计</th>
           <th>R / F / M 分</th>
           <th>可触达</th>
           <th v-if="showCluster">所属簇</th>
@@ -21,6 +23,10 @@
           <td>{{ row.store_name }}</td>
           <td class="num">{{ row.recency_days }}</td>
           <td class="num">{{ row.frequency }}</td>
+          <td v-if="showCorrection" class="num muted">{{ formatMoney(row.gross_monetary, 0) }}</td>
+          <td v-if="showCorrection" class="num reversal">
+            {{ row.refunded_monetary ? formatMoney(row.refunded_monetary, 0) : '—' }}
+          </td>
           <td class="num">{{ formatMoney(row.monetary, 0) }}</td>
           <td>
             <span class="scores">
@@ -35,7 +41,9 @@
           <td v-if="showCluster">{{ labelOf(row.cluster_key) }}</td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="showCluster ? 10 : 9" class="muted">没有符合条件的会员。</td>
+          <td :colspan="showCluster ? (showCorrection ? 12 : 10) : showCorrection ? 11 : 9" class="muted">
+            没有符合条件的会员。
+          </td>
         </tr>
       </tbody>
     </table>
@@ -52,8 +60,9 @@ const props = withDefaults(
     rows: RunMemberRow[]
     clusters?: ClusterProfile[]
     showCluster?: boolean
+    showCorrection?: boolean
   }>(),
-  { clusters: () => [], showCluster: false },
+  { clusters: () => [], showCluster: false, showCorrection: false },
 )
 
 function labelOf(key: string): string {
@@ -81,5 +90,8 @@ function labelOf(key: string): string {
 }
 .consent.off {
   color: var(--ink-3);
+}
+.reversal {
+  color: var(--rust);
 }
 </style>

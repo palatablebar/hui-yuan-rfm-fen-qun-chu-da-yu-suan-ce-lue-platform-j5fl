@@ -35,6 +35,12 @@ const router = createRouter({
       component: () => import('../pages/OutreachPage.vue'),
       meta: { title: '名单导出与触达' },
     },
+    {
+      path: '/reconciliation',
+      name: 'reconciliation',
+      component: () => import('../pages/ReconciliationPage.vue'),
+      meta: { title: '更正对账' },
+    },
     { path: '/:pathMatch(.*)*', redirect: '/segments' },
   ],
 })

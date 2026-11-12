@@ -99,7 +99,12 @@
         />
         <button class="btn btn-sm" type="button" @click="applySearch">筛选</button>
       </template>
-      <MemberTable v-if="store.members" :rows="store.members.items" :clusters="run?.clusters" />
+      <MemberTable
+        v-if="store.members"
+        :rows="store.members.items"
+        :clusters="run?.clusters"
+        :show-correction="hasCorrections"
+      />
       <div class="row" style="margin-top: 12px" data-testid="member-pager">
         <span class="muted">
           共 {{ store.members?.total ?? 0 }} 人 · 第 {{ store.members?.page ?? 1 }} / {{ store.members?.pages || 1 }} 页
@@ -110,6 +115,57 @@
       </div>
     </StrataPanel>
 
+    <StrataPanel
+      v-if="run?.order_ledger"
+      eyebrow="as-of ledger · 统计日有效订单口径"
+      style="margin-top: 18px"
+      data-testid="run-ledger"
+    >
+      <div class="ledger-grid">
+        <div class="ledger-cell">
+          <span class="eyebrow">销售单（≤ as-of）</span>
+          <strong>{{ formatInt(run.order_ledger.sale_orders) }}</strong>
+        </div>
+        <div class="ledger-cell">
+          <span class="eyebrow">有效订单</span>
+          <strong>{{ formatInt(run.order_ledger.effective_orders) }}</strong>
+        </div>
+        <div class="ledger-cell">
+          <span class="eyebrow">撤销剔除</span>
+          <strong class="reversal">{{ formatInt(run.order_ledger.voided_orders) }}</strong>
+        </div>
+        <div class="ledger-cell">
+          <span class="eyebrow">退款订单</span>
+          <strong class="reversal">{{ formatInt(run.order_ledger.refunded_orders) }}</strong>
+        </div>
+        <div class="ledger-cell">
+          <span class="eyebrow">统计日后未采纳</span>
+          <strong>{{ formatInt(run.order_ledger.after_cutoff_sales) }}</strong>
+        </div>
+        <div class="ledger-cell">
+          <span class="eyebrow">毛 GMV</span>
+          <strong>{{ formatMoney(run.order_ledger.gross_gmv) }}</strong>
+        </div>
+        <div class="ledger-cell">
+          <span class="eyebrow">退款冲减</span>
+          <strong class="reversal">{{ formatMoney(run.order_ledger.refund_amount) }}</strong>
+        </div>
+        <div class="ledger-cell">
+          <span class="eyebrow">撤销冲减</span>
+          <strong class="reversal">{{ formatMoney(run.order_ledger.void_amount) }}</strong>
+        </div>
+        <div class="ledger-cell">
+          <span class="eyebrow">净 GMV（分群口径）</span>
+          <strong>{{ formatMoney(run.order_ledger.net_gmv) }}</strong>
+        </div>
+      </div>
+      <p class="muted" style="margin-top: 10px; font-size: var(--step--1)">
+        采纳更正 {{ formatInt(run.order_ledger.correction_applied) }} 条 · 重复投递拦截
+        {{ formatInt(run.order_ledger.correction_duplicate_total) }} 条；退款只冲减 M 不冲减 F，
+        撤销整笔剔除，退款/撤销单本身不进入名单。
+      </p>
+    </StrataPanel>
+
     <EmptyState
       v-if="!run && !store.loading"
       title="没有可读的批次"
@@ -117,7 +173,7 @@
     />
 
     <p class="core-footer">
-      <span>订单事实 {{ orderStore.totals?.orders ?? '—' }} 条</span>
+      <span>有效订单 {{ orderStore.totals?.orders ?? '—' }} 条（as-of {{ run?.as_of ?? '—' }}）</span>
       <span>券核销率 {{ formatPercent(orderStore.totals?.redemption_rate) }}</span>
       <span>等频五分位 · z-score</span>
       <span style="margin-left: auto">page {{ page }}</span>
@@ -159,6 +215,17 @@ const clusterKey = ref('')
 const search = ref('')
 const page = ref(1)
 const run = computed(() => store.current)
+const hasCorrections = computed(() => {
+  const ledger = run.value?.order_ledger
+  return Boolean(
+    ledger &&
+      (ledger.refund_amount > 0 ||
+        ledger.void_amount > 0 ||
+        ledger.voided_orders > 0 ||
+        ledger.refunded_orders > 0 ||
+        ledger.after_cutoff_sales > 0),
+  )
+})
 const activeCluster = computed(() =>
   (run.value?.clusters ?? []).find((cluster) => cluster.cluster_key === clusterKey.value),
 )
@@ -182,6 +249,8 @@ async function loadRun(runId: number) {
       ''
     clusterKey.value = target
     page.value = 1
+    // 订单基数与券核销率按批次统计日取有效口径，避免把统计日后的补传数据算进来
+    orderStore.loadSummary(detail.as_of).catch(() => undefined)
     await loadMembers()
   } catch {
     /* handled by store.error */
@@ -220,11 +289,11 @@ async function reload() {
 
 onMounted(async () => {
   memberStore.loadStores().catch(() => undefined)
-  orderStore.loadSummary().catch(() => undefined)
   try {
     await store.loadRuns()
     const target = store.currentId ?? store.latestCompleted?.id ?? store.runs[0]?.id
     if (target) await loadRun(target)
+    else orderStore.loadSummary().catch(() => undefined)
   } catch {
     /* handled */
   }
@@ -314,6 +383,29 @@ onMounted(async () => {
   font-family: var(--font-display);
   font-size: var(--step-1);
   font-variant-numeric: tabular-nums;
+}
+.ledger-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+}
+.ledger-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  background: var(--paper);
+}
+.ledger-cell strong {
+  font-family: var(--font-display);
+  font-size: var(--step-1);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+.ledger-cell strong.reversal {
+  color: var(--rust);
 }
 @media (max-width: 980px) {
   .run-brief {

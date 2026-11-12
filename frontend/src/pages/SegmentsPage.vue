@@ -57,9 +57,12 @@
         <div class="kpi-foot">{{ run.clusters?.map((item) => item.short).join(' · ') }}</div>
       </div>
       <div class="kpi">
-        <div class="kpi-label">样本 GMV</div>
+        <div class="kpi-label">样本净 GMV（as-of 有效口径）</div>
         <div class="kpi-value">{{ formatMoney(run.gmv_total) }}<small>元</small></div>
-        <div class="kpi-foot">耗时 {{ formatDuration(run.duration_ms) }}</div>
+        <div class="kpi-foot">
+          毛 {{ formatMoney(run.gross_gmv_total ?? run.gmv_total) }} · 退款冲减
+          {{ formatMoney(run.refund_gmv_total ?? 0) }} · 耗时 {{ formatDuration(run.duration_ms) }}
+        </div>
       </div>
     </div>
 

@@ -20,6 +20,8 @@ export interface RunMemberRow {
   recency_days: number
   frequency: number
   monetary: number
+  gross_monetary: number
+  refunded_monetary: number
   r_score: number
   f_score: number
   m_score: number

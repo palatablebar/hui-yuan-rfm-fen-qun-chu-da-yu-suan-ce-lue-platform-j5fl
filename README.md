@@ -11,6 +11,7 @@
   2. 券预算固定 8,000 元，不知道给哪一档最值；
   3. 分群结论不可复现（Excel 手改、没有随机种子与口径版本）。
 - **上下游**：上游 = POS 订单事实 + 会员授权资料 → 本系统替代「人工拍分档 + 群发」 → 下游 = 门店券核销、企微触达、月度复盘。
+- **POS 补传口径**：门店会补传退款单、撤销单与迟到订单。`order_facts` 以事件溯源方式保存全部事件（原单永不覆盖、永不删除）；会员分析只认**统计日 as-of 及之前的有效订单**——撤销单整笔剔除（F/M 同时冲减），退款单只冲减金额 M、不冲减订单数 F，统计日之后的迟到单/更正不进入该 as-of 视图，同一 `correction_no` 的更正重复投递只生效一次。
 - **角色权限**：
 
 | 角色 | 账户 | 主要页面 | 权限 | 典型动作 |
@@ -32,28 +33,30 @@
 7. 10:30 店长用 viewer 账号下载同一份名单，尝试导出被 403 拒绝；
 8. 16:00 复盘：导出记录与审计日志可追溯操作人、渠道、行数。
 
-## 2. 主要功能（除登录外 4 个业务模块）
+## 2. 主要功能（除登录外 5 个业务模块）
 
-1. **会员与订单数据**：`/api/members`、`/api/members/stores`、`/api/orders/summary`（8 门店订单量 / GMV / 券核销率）；订单事实在 seed 中落库，分群时聚合，RFM 明细页展示门店订单基数与整体核销率。
-2. **RFM 分群**：`/api/segments/runs` 创建/查询批次、簇成员分页；k=auto（3–8 轮廓系数选优）或指定 k。
-3. **簇画像与预算策略**：`/api/strategies` 创建预算分配、发布；算法输出三档券面额与预计核销/GMV。
-4. **名单导出与触达记录**：`/api/strategies/{id}/exports` 生成 CSV 名单并写触达记录，`/download` 下载。
-5. 审计日志（admin）：`/api/audit/logs`；限流：写操作每用户 60 次/分钟。
+1. **会员与订单数据**：`/api/members`、`/api/members/stores`、`/api/orders/summary?as_of=`（8 门店**有效**订单量 / 净 GMV / 券核销率，附原始事件数与更正概览）；订单事实在 seed 中落库，分群时按 as-of 聚合，RFM 明细页展示门店订单基数与整体核销率。
+2. **POS 补传更正**：`POST /api/orders/corrections` 接收销售/迟到/退款/撤销事件，`correction_no` 幂等（首次 201、重复投递 200 且 `duplicate=true`，不二次冲减）；退款超额、撤销后退款、跨会员冲减等非法更正写入即被拒绝。
+3. **RFM 分群**：`/api/segments/runs` 创建/查询批次、簇成员分页；k=auto（3–8 轮廓系数选优）或指定 k。批次快照内附 `order_ledger` 台账（毛 GMV / 退款 / 撤销 / 净 GMV / 采纳与重复更正计数）。
+4. **簇画像与预算策略**：`/api/strategies` 创建预算分配、发布；算法输出三档券面额与预计核销/GMV。
+5. **名单导出与触达记录**：`/api/strategies/{id}/exports` 生成 CSV 名单（含原累计、退款冲减、净 M）并写触达记录，`/download` 下载。
+6. **更正对账**：`/api/reconciliation` 在同一响应里给齐原单视角、更正采纳/未采纳原因、会员 gross→net 消费、两批次分群人数差异与同预算重算的预算差异；`/api/reconciliation/corrections` 提供更正流水。退款/撤销单本身不进入任何簇名单。
+7. 审计日志（admin）：`/api/audit/logs`；限流：写操作每用户 60 次/分钟。
 
 ## 3. 算法（Python 真算，前端只展示）
 
 ### 算法 1：RFM 五分位打分 + numpy 手写 KMeans
 
-- 输入：会员主数据 + 订单事实（`amount / ordered_at / coupon_issued / coupon_redeemed`）。
-- 聚合：R = as-of 与最后订单相差天数；F = 订单数；M = 累计金额。
+- 输入：会员主数据 + 订单事实（`amount / ordered_at / coupon_issued / coupon_redeemed / order_type / original_order_no / correction_no`）。
+- 聚合：先由 `order_ledger.build_order_ledger` 生成 **as-of 有效订单视图**（剔除统计日之后事件与撤销单、扣减退款、更正去重），再按会员聚合 R = as-of 与最后有效订单相差天数；F = 有效订单数；M = 净累计金额（原累计 − 退款冲减，撤销单整笔不计）。
 - 打分：每个维度做**等频五分位**（每档约 20%，R 反向），`score ∈ {1..5}`。
 - 标准化：三维分数 z-score。
 - KMeans：k-means++ 初始化 + 手写迭代（`numpy`，非 sklearn）；`random_state=5741 + k`。
 - 选 k：k=3..8，取平均轮廓系数 `s=(b−a)/max(a,b)` 最大者（同分取较小 k）。
 - 输出：簇画像（人数、可触达、GMV 占比、R/F/M 均值、券核销率、客单价）、每人分数、直方图、散点。
-- 可复现：固定 as-of、固定 random_state、订单聚合口径写死；seed 数据由固定随机种子生成。
+- 可复现：固定 as-of、固定 random_state、订单聚合口径写死（含更正台账口径）；seed 数据由固定随机种子生成。
 - 失败态：会员 < 100 → `RFM-3001`（422/409 业务错误）。
-- 实现：`backend/app/services/rfm_engine.py`；口径常量：`backend/app/constants/rfm.py`。
+- 实现：`backend/app/services/rfm_engine.py`；as-of 更正台账：`backend/app/services/order_ledger.py`；口径常量：`backend/app/constants/rfm.py`、`backend/app/constants/order_types.py`。
 
 ### 算法 2：预算分配与券面额建议
 
@@ -75,9 +78,10 @@ docker compose up -d --build  # 5 服务：db / redis / backend / worker / front
 
 首次启动 `SEED_DEMO=true` 时自动执行 `backend/scripts/seed_demo.py`：
 
-- 8 门店 / 600 会员 / 2,400 订单 / 1 次分群 / 3 账号；
-- 结束打印一行：`SEED_SUMMARY brand=rfmseg stores=8 members=600 orders=2400 segments=1 users=3`；
-- 幂等：用户按 email、会员按 member_no、订单按 order_no、批次按 run_no 判重，重复执行不新增、不覆盖。
+- 8 门店 / 600 会员 / 2,400 原始订单 + 4 条 POS 更正事件（1 迟到补传单、2 退款、1 撤销；另含 2 条同 `correction_no` 的重复投递用于演示幂等去重）/ 2 次分群 / 3 账号；
+- 两个演示批次：`SEG-20261112-001`（as-of 2026-11-12，更正事件全在统计日之后，结果与历史口径一致）与 `SEG-20261130-001`（as-of 2026-11-30，采纳全部更正，用于对账页核对差异）；
+- 结束打印一行：`SEED_SUMMARY brand=rfmseg stores=8 members=600 orders=2404 segments=2 users=3`；
+- 幂等：用户按 email、会员按 member_no、订单按 order_no、更正按 correction_no、批次按 run_no 判重，重复执行不新增、不覆盖。
 
 本地开发：
 
@@ -112,6 +116,11 @@ worker/{Dockerfile,entrypoint.sh,healthy.py,wait_for_deps.py}
 docker-compose.yml  .env.example
 ```
 
+关键服务：`services/order_ledger.py`（as-of 更正台账，纯 Python 可独立复算）、
+`services/order_correction_service.py`（POS 补传幂等落库）、
+`services/reconciliation_service.py`（原单/冲减/消费/分群/预算五维对账）、
+`services/rfm_engine.py`（在有效订单视图上聚合 RFM 与 KMeans）。
+
 ## 7. 环境变量
 
 见 `.env.example`：`COMPOSE_PROJECT_NAME`、`DB_*`、`JWT_SECRET`、`FRONTEND_PORT/BACKEND_PORT/DB_PORT`、`REDIS_URL`、`RUN_DAILY_QUOTA`、`RATE_WINDOW_*`、`SEED_DEMO`。
@@ -131,6 +140,7 @@ docker-compose.yml  .env.example
 | 角色 `admin/analyst/viewer` | `backend/app/constants/roles.py` | `frontend/src/constants/roles.ts` |
 | 分群状态 `queued/running/completed/failed` | `backend/app/constants/segment_status.py` | `frontend/src/constants/segmentStatus.ts` |
 | 策略状态 `draft/published/archived` | `backend/app/constants/strategy_status.py` | `frontend/src/constants/strategyStatus.ts` |
+| 订单/更正类型 `SALE/LATE_SALE/REFUND/VOID` | `backend/app/constants/order_types.py` | `frontend/src/constants/orderTypes.ts` |
 | 簇类型 `HIGH_VALUE_DORMANT/...` | `backend/app/constants/cluster_kinds.py` | `frontend/src/constants/clusterKinds.ts` |
 | 错误码 `RFM-xxxx` | `backend/app/constants/error_codes.py` | `frontend/src/constants/messages.ts` |
 

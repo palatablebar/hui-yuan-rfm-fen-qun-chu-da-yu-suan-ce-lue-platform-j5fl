@@ -1,25 +1,38 @@
-"""幂等演示 seed：拾光咖啡 8 门店 / 600 会员 / 2400 订单 / 1 次分群 / 3 账号。
+"""幂等演示 seed：拾光咖啡 8 门店 / 600 会员 / 2400 订单 / POS 更正事件 / 2 次分群 / 3 账号。
 
 幂等策略：
-- 用户按 email、会员按 member_no、订单按 order_no 做自然键 upsert（已存在则不改）；
+- 用户按 email、会员按 member_no、订单按 order_no 做自然键判重（已存在则不改）；
+- 更正事件按 order_no 判重、按 correction_no 保证同一笔更正只生效一次；
 - 演示分群批次按固定 run_no 判重，已存在则不重算；
 - 结束时打印一行固定格式 SEED_SUMMARY，连续两次运行逐字一致。
+
+两个演示批次：
+- SEG-20261112-001（as-of 2026-11-12）：基线，全部更正事件都在统计日之后，结果与历史口径逐字一致；
+- SEG-20261130-001（as-of 2026-11-30）：采纳退款/撤销/迟到单后的更正批次，用于对账页核对差异。
 """
 from __future__ import annotations
+
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 
 from app.config.database import SessionLocal
-from app.constants.roles import ROLE_ADMIN, ROLE_ANALYST, ROLE_VIEWER
 from app.constants.rfm import REFERENCE_DATE, RANDOM_STATE
+from app.constants.roles import ROLE_ADMIN, ROLE_ANALYST, ROLE_VIEWER
 from app.models import Member, OrderFact, SegmentRun, User
 from app.services import segment_service
 from app.utils.logger import log_event
 from app.utils.password import hash_password
-from scripts.seed_data import STORES, build_demo_dataset
+from scripts.seed_data import (
+    CORRECTION_RUN_DATE,
+    STORES,
+    build_correction_events,
+    build_demo_dataset,
+)
 
 DEMO_PASSWORD = "Demo@2026"
 SEED_RUN_NO = "SEG-20261112-001"
+CORRECTION_RUN_NO = "SEG-20261130-001"
 
 DEMO_USERS = [
     {
@@ -87,20 +100,35 @@ def _ensure_orders(db, order_rows: list[dict]) -> None:
         for member_no, member_id in db.execute(select(Member.member_no, Member.id)).all()
     }
     existing = set(db.scalars(select(OrderFact.order_no)).all())
+    seen_correction_nos = set(
+        no for no in db.scalars(select(OrderFact.correction_no)).all() if no
+    )
     pending = []
     for row in order_rows:
         if row["order_no"] in existing:
             continue
+        correction_no = row.get("correction_no")
+        if correction_no:
+            if correction_no in seen_correction_nos:
+                # 同一笔更正重复投递（跨批或同批）：跳过，不产生新行、不二次冲减
+                continue
+            seen_correction_nos.add(correction_no)
+        is_correction = row.get("order_type") in ("REFUND", "VOID")
+        signed_amount = -row["amount"] if is_correction else row["amount"]
         pending.append(
             OrderFact(
                 order_no=row["order_no"],
+                correction_no=correction_no,
+                order_type=row.get("order_type", "SALE"),
+                original_order_no=row.get("original_order_no"),
                 member_id=member_map[row["member_no"]],
                 store_code=row["store_code"],
-                amount=row["amount"],
+                amount=signed_amount,
                 ordered_at=row["ordered_at"],
                 coupon_issued=row["coupon_issued"],
                 coupon_redeemed=row["coupon_redeemed"],
                 coupon_discount=row["coupon_discount"],
+                received_at=datetime.now(timezone.utc),
             )
         )
     if pending:
@@ -108,16 +136,16 @@ def _ensure_orders(db, order_rows: list[dict]) -> None:
     db.commit()
 
 
-def _ensure_segment(db, admin: User) -> None:
-    run = db.scalar(select(SegmentRun).where(SegmentRun.run_no == SEED_RUN_NO))
+def _ensure_segment(db, admin: User, run_no: str, name: str, as_of) -> None:
+    run = db.scalar(select(SegmentRun).where(SegmentRun.run_no == run_no))
     if run is not None:
         return
     run = SegmentRun(
-        run_no=SEED_RUN_NO,
-        name="2026-11 会员 RFM 基线分群",
+        run_no=run_no,
+        name=name,
         status="queued",
         k_requested="auto",
-        as_of=REFERENCE_DATE,
+        as_of=as_of,
         random_state=RANDOM_STATE,
         created_by=admin.id,
     )
@@ -134,7 +162,18 @@ def run_seed() -> dict:
         dataset = build_demo_dataset()
         _ensure_members(db, dataset["members"])
         _ensure_orders(db, dataset["orders"])
-        _ensure_segment(db, users[ROLE_ADMIN])
+
+        corrections = build_correction_events(dataset)
+        _ensure_orders(db, corrections)
+
+        _ensure_segment(db, users[ROLE_ADMIN], SEED_RUN_NO, "2026-11 会员 RFM 基线分群", REFERENCE_DATE)
+        _ensure_segment(
+            db,
+            users[ROLE_ADMIN],
+            CORRECTION_RUN_NO,
+            "2026-11-30 POS 退款/撤销/迟到单更正后分群",
+            CORRECTION_RUN_DATE,
+        )
 
         member_count = db.scalar(select(func.count()).select_from(Member)) or 0
         order_count = db.scalar(select(func.count()).select_from(OrderFact)) or 0

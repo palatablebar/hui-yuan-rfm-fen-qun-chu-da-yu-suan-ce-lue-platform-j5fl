@@ -22,6 +22,7 @@
           <router-link to="/members">RFM 明细</router-link>
           <router-link to="/strategy">策略配置</router-link>
           <router-link to="/outreach">名单导出</router-link>
+          <router-link to="/reconciliation">更正对账</router-link>
         </nav>
         <div class="topbar-right">
           <div class="user-chip">

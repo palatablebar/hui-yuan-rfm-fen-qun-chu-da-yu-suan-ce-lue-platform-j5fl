@@ -75,12 +75,34 @@ export interface ScatterPoint {
   cluster_key: string
 }
 
+export interface OrderLedgerSummary {
+  sale_orders: number
+  late_sale_orders: number
+  after_cutoff_sales: number
+  voided_orders: number
+  refunded_orders: number
+  effective_orders: number
+  gross_gmv: number
+  refund_amount: number
+  void_amount: number
+  net_gmv: number
+  correction_total: number
+  correction_applied: number
+  correction_duplicate_total: number
+  gross_gmv_members?: number
+  net_gmv_members?: number
+  refund_gmv_members?: number
+}
+
 export interface RunDetail extends RunSummary {
   clusters?: ClusterProfile[]
   silhouette_curve?: SilhouettePoint[]
   histograms?: Histograms
   scatter?: ScatterPoint[]
   gmv_total?: number
+  gross_gmv_total?: number
+  refund_gmv_total?: number
+  order_ledger?: OrderLedgerSummary
   assignments_count?: number
   scoring_note?: string
 }

@@ -15,7 +15,7 @@ from app.middlewares.audit_logger import AuditMiddleware
 from app.middlewares.auth import AuthMiddleware
 from app.middlewares.error_handler import RequestIdMiddleware, install_error_handlers
 from app.middlewares.rate_limit import RateLimitMiddleware
-from app.routes import audit, auth, health, member, meta, order, segment, strategy
+from app.routes import audit, auth, health, member, meta, order, reconciliation, segment, strategy
 from app.utils.logger import log_event
 
 
@@ -61,6 +61,7 @@ for _prefix in ("", "/api"):
     app.include_router(auth.router, prefix=_prefix)
     app.include_router(member.router, prefix=_prefix)
     app.include_router(order.router, prefix=_prefix)
+    app.include_router(reconciliation.router, prefix=_prefix)
     app.include_router(segment.router, prefix=_prefix)
     app.include_router(strategy.router, prefix=_prefix)
     app.include_router(audit.router, prefix=_prefix)
@@ -77,6 +78,9 @@ def index() -> dict:
             "/auth/login",
             "/meta/enums",
             "/members",
+            "/orders/summary",
+            "/orders/corrections",
+            "/reconciliation",
             "/segments/runs",
             "/strategies",
             "/audit/logs",

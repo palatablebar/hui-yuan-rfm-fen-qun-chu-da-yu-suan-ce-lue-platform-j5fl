@@ -69,6 +69,9 @@ def serialize_run(run: SegmentRun, detail: bool = False) -> dict:
                 "histograms": result.get("histograms", {}),
                 "scatter": result.get("scatter", []),
                 "gmv_total": result.get("gmv_total"),
+                "gross_gmv_total": result.get("gross_gmv_total"),
+                "refund_gmv_total": result.get("refund_gmv_total"),
+                "order_ledger": result.get("order_ledger"),
                 "assignments_count": len(result.get("assignments") or []),
                 "scoring_note": result.get("scoring_note"),
                 "k_min": 3,
@@ -159,11 +162,17 @@ def execute_run_sync(db: Session, run: SegmentRun) -> SegmentRun:
         ]
         order_rows = [
             {
+                "id": order.id,
+                "order_no": order.order_no,
                 "member_id": order.member_id,
                 "amount": float(order.amount),
                 "ordered_at": order.ordered_at,
                 "coupon_issued": order.coupon_issued,
                 "coupon_redeemed": order.coupon_redeemed,
+                "order_type": order.order_type,
+                "original_order_no": order.original_order_no,
+                "correction_no": order.correction_no,
+                "store_code": order.store_code,
             }
             for order in orders
         ]
@@ -250,6 +259,8 @@ def _enriched_cluster_members(db: Session, run: SegmentRun, cluster_key: str) ->
                 "recency_days": item["recency_days"],
                 "frequency": item["frequency"],
                 "monetary": item["monetary"],
+                "gross_monetary": item.get("gross_monetary", item["monetary"]),
+                "refunded_monetary": item.get("refunded_monetary", 0.0),
                 "r_score": item["r_score"],
                 "f_score": item["f_score"],
                 "m_score": item["m_score"],

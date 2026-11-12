@@ -20,6 +20,8 @@ import numpy as np
 
 RANDOM_SEED = 20261112
 REFERENCE_DATE = date(2026, 11, 12)
+# 更正演示批次的统计日：基线批次之后补传的退款/撤销/迟到单在这一天全部可见
+CORRECTION_RUN_DATE = date(2026, 11, 30)
 TARGET_MEMBERS = 600
 TARGET_ORDERS = 2400
 # 分数 → 订单数：1/2/3/5/9 使总数恰好 2400（600 人 × 4 单均值）
@@ -247,14 +249,96 @@ def build_demo_dataset() -> dict:
     return {"stores": STORES, "members": members, "orders": orders}
 
 
+def build_correction_events(dataset: dict) -> list[dict]:
+    """在确定性演示数据上构造 POS 补传更正事件（固定订单号，可复算、可对账）。
+
+    覆盖四类场景（基线 as-of 2026-11-12 全部不可见，更正批次 as-of 2026-11-30 可见）：
+    1. 迟到补传销售单 1 笔（业务发生在 11-12 之后）；
+    2. 部分退款 2 笔（统计日后到达，只冲减 M 不冲减 F）；
+    3. 整笔撤销 1 笔（原单 F/M 全部剔除）；
+    4. 同一笔退款的重复投递 1 条（相同 correction_no，幂等只生效一次）。
+    """
+    orders = dataset["orders"]
+    members = dataset["members"]
+    member_by_no = {item["member_no"]: item for item in members}
+    # 选金额较大的稳定样本，保证冲减后分群真的会迁移
+    refund_targets = [orders[12], orders[88]]
+    void_target = orders[240]
+    late_target_member = members[7]
+
+    corrections: list[dict] = []
+
+    def push(row: dict) -> None:
+        corrections.append(row)
+
+    # 1) 迟到补传销售单：业务发生在统计日之后，基线批次不可见
+    late_member = member_by_no[late_target_member["member_no"]]
+    push(
+        {
+            "order_no": "SG-O900001",
+            "correction_no": None,
+            "order_type": "LATE_SALE",
+            "original_order_no": None,
+            "member_no": late_member["member_no"],
+            "store_code": late_member["store_code"],
+            "amount": 128.0,
+            "ordered_at": datetime.combine(REFERENCE_DATE + timedelta(days=3), time(10, 20)),
+            "coupon_issued": True,
+            "coupon_redeemed": True,
+            "coupon_discount": 12.0,
+        }
+    )
+
+    # 2) 部分退款（金额取原单 40%，POS 投递为正数，落库时转负）
+    for index, target in enumerate(refund_targets, start=1):
+        member = member_by_no[target["member_no"]]
+        refund_amount = round(target["amount"] * 0.4, 2)
+        common = {
+            "order_no": f"SG-O9000{10 + index}",
+            "correction_no": f"CR-REF-{index:04d}",
+            "order_type": "REFUND",
+            "original_order_no": target["order_no"],
+            "member_no": target["member_no"],
+            "store_code": member["store_code"],
+            "amount": refund_amount,
+            "ordered_at": datetime.combine(REFERENCE_DATE + timedelta(days=2 + index), time(15, 5)),
+            "coupon_issued": False,
+            "coupon_redeemed": False,
+            "coupon_discount": 0.0,
+        }
+        push(common)
+        # 4) 同一 correction_no 重复投递（order_no 换新但幂等键相同 → 只生效一次）
+        push({**common, "order_no": f"SG-O9000{20 + index}", "ordered_at": common["ordered_at"] + timedelta(hours=1)})
+
+    # 3) 整笔撤销
+    void_member = member_by_no[void_target["member_no"]]
+    push(
+        {
+            "order_no": "SG-O900030",
+            "correction_no": "CR-VOD-0001",
+            "order_type": "VOID",
+            "original_order_no": void_target["order_no"],
+            "member_no": void_target["member_no"],
+            "store_code": void_member["store_code"],
+            "amount": void_target["amount"],
+            "ordered_at": datetime.combine(REFERENCE_DATE + timedelta(days=6), time(9, 40)),
+            "coupon_issued": False,
+            "coupon_redeemed": False,
+            "coupon_discount": 0.0,
+        }
+    )
+    return corrections
+
+
 if __name__ == "__main__":
     dataset = build_demo_dataset()
     print(
-        "stores=%d members=%d orders=%d sum_amount=%.2f"
+        "stores=%d members=%d orders=%d sum_amount=%.2f corrections=%d"
         % (
             len(dataset["stores"]),
             len(dataset["members"]),
             len(dataset["orders"]),
             sum(item["amount"] for item in dataset["orders"]),
+            len(build_correction_events(dataset)),
         )
     )

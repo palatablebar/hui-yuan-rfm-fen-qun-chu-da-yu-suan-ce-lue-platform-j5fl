@@ -21,13 +21,14 @@ export const useOrderStore = defineStore('order', {
       for (const item of state.summary?.stores ?? []) map[item.store_code] = item
       return map
     },
+    correctionOverview: (state) => state.summary?.correction_overview ?? null,
   },
   actions: {
-    async loadSummary() {
+    async loadSummary(asOf?: string) {
       this.loading = true
       this.error = ''
       try {
-        this.summary = await fetchOrderSummary()
+        this.summary = await fetchOrderSummary(asOf)
         return this.summary
       } catch (error) {
         this.error = (error as { message?: string }).message ?? '加载订单事实失败'

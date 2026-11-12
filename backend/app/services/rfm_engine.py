@@ -4,11 +4,14 @@
 脚本共用同一份实现，配合固定 ``random_state`` 保证分群结果可复现。
 
 口径：
-1. 从订单事实表按会员聚合 R（距 as-of 天数，越小越好）/ F（订单数）/ M（GMV）；
-2. 每个维度做等频五分位打分（1-5，R 反向），恰好每档约 20% 会员；
-3. 三个分数做 z-score 标准化后进入 KMeans（k-means++ 初始化，手写迭代）；
-4. k 在 3..8 之间按平均轮廓系数 ``s=(b-a)/max(a,b)`` 选最优（同分取较小 k）；
-5. 按簇均值分数生成业务画像与类型（高价值沉睡 / 核心活跃 / ...）。
+1. 订单先经 ``order_ledger.build_order_ledger`` 整理为 **as-of 统计日口径的有效订单**：
+   统计日之后的销售/迟到单与更正不采纳，撤销单整笔剔除，退款单只冲减金额，
+   同一更正重复投递只生效一次；本模块只在有效订单上聚合，退款/撤销单不进名单；
+2. 从有效订单按会员聚合 R（距 as-of 天数，越小越好）/ F（有效订单数）/ M（净 GMV）；
+3. 每个维度做等频五分位打分（1-5，R 反向），恰好每档约 20% 会员；
+4. 三个分数做 z-score 标准化后进入 KMeans（k-means++ 初始化，手写迭代）；
+5. k 在 3..8 之间按平均轮廓系数 ``s=(b-a)/max(a,b)`` 选最优（同分取较小 k）；
+6. 按簇均值分数生成业务画像与类型（高价值沉睡 / 核心活跃 / ...）。
 """
 from __future__ import annotations
 
@@ -58,7 +61,10 @@ def aggregate_features(
     """按会员聚合 RFM 与券历史。
 
     members: {member_id, member_no, name, store_code, store_name, consent, joined_at}
-    orders:  {member_id, amount, ordered_at, coupon_issued, coupon_redeemed}
+    orders:  **as-of 口径的有效订单**（由 order_ledger.build_order_ledger 产出），
+             元素含 {member_id, amount(净金额), ordered_at, coupon_issued,
+             coupon_redeemed, gross_amount, refunded_amount, status}；
+             退款单 / 撤销单 / 统计日之后事件不会出现在这里。
     """
     stats: dict[int, dict] = {}
     for order in orders:
@@ -68,6 +74,8 @@ def aggregate_features(
             {
                 "frequency": 0,
                 "monetary": 0.0,
+                "gross_monetary": 0.0,
+                "refunded_monetary": 0.0,
                 "last_order": None,
                 "coupon_issued": 0,
                 "coupon_redeemed": 0,
@@ -77,6 +85,8 @@ def aggregate_features(
         ordered_at = _to_date(order.get("ordered_at"))
         bucket["frequency"] += 1
         bucket["monetary"] += amount
+        bucket["gross_monetary"] += float(order.get("gross_amount", amount) or 0.0)
+        bucket["refunded_monetary"] += float(order.get("refunded_amount", 0.0) or 0.0)
         if bucket["last_order"] is None or ordered_at > bucket["last_order"]:
             bucket["last_order"] = ordered_at
         if order.get("coupon_issued"):
@@ -91,11 +101,13 @@ def aggregate_features(
         if bucket and bucket["last_order"] is not None:
             recency_days = max((as_of - bucket["last_order"]).days, 0)
             frequency = bucket["frequency"]
-            monetary = round(bucket["monetary"], 2)
-        else:  # 没有任何订单的僵尸会员，给最差 R/F/M，但仍参与打分
+            monetary = round(max(bucket["monetary"], 0.0), 2)
+        else:  # 没有任何有效订单的僵尸会员，给最差 R/F/M，但仍参与打分
             recency_days = 365
             frequency = 0
             monetary = 0.0
+        gross_monetary = round(bucket["gross_monetary"], 2) if bucket else 0.0
+        refunded_monetary = round(bucket["refunded_monetary"], 2) if bucket else 0.0
         features.append(
             {
                 "member_id": mid,
@@ -108,6 +120,8 @@ def aggregate_features(
                 "recency_days": int(recency_days),
                 "frequency": int(frequency),
                 "monetary": float(monetary),
+                "gross_monetary": float(gross_monetary),
+                "refunded_monetary": float(refunded_monetary),
                 "aov": round(monetary / frequency, 2) if frequency else 0.0,
                 "coupon_issued": int(bucket["coupon_issued"]) if bucket else 0,
                 "coupon_redeemed": int(bucket["coupon_redeemed"]) if bucket else 0,
@@ -414,9 +428,13 @@ def run_segmentation(
     random_state: int = RANDOM_STATE,
 ) -> dict:
     from app.constants.rfm import REFERENCE_DATE
+    from app.services.order_ledger import build_order_ledger
 
     as_of_date = _to_date(as_of) if as_of else REFERENCE_DATE
-    features = aggregate_features(members, orders, as_of_date)
+    # 先做 as-of 更正台账：剔除统计日之后事件、撤销单与重复更正，退款只冲减金额
+    ledger = build_order_ledger(orders, as_of_date)
+    effective_orders = ledger["effective_orders"]
+    features = aggregate_features(members, effective_orders, as_of_date)
     if len(features) < MIN_MEMBERS:
         raise SegmentationError(
             f"会员样本不足 100 人（当前 {len(features)} 人），无法做五分位分群",
@@ -478,11 +496,19 @@ def run_segmentation(
                 "recency_days": feature["recency_days"],
                 "frequency": feature["frequency"],
                 "monetary": feature["monetary"],
+                "gross_monetary": feature["gross_monetary"],
+                "refunded_monetary": feature["refunded_monetary"],
             }
         )
     histograms = build_histograms(features, scores)
     scatter = build_scatter(features, labels, key_map)
     gmv_total = round(sum(item["monetary"] for item in features), 2)
+    gross_gmv_total = round(sum(item["gross_monetary"] for item in features), 2)
+    refund_gmv_total = round(sum(item["refunded_monetary"] for item in features), 2)
+    ledger_summary = dict(ledger["summary"])
+    ledger_summary["gross_gmv_members"] = gross_gmv_total
+    ledger_summary["net_gmv_members"] = gmv_total
+    ledger_summary["refund_gmv_members"] = refund_gmv_total
 
     return {
         "as_of": as_of_date.isoformat(),
@@ -495,9 +521,16 @@ def run_segmentation(
         "member_count": len(features),
         "cluster_count": len(profiles),
         "gmv_total": gmv_total,
+        "gross_gmv_total": gross_gmv_total,
+        "refund_gmv_total": refund_gmv_total,
+        "order_ledger": ledger_summary,
         "clusters": profiles,
         "assignments": assignments,
         "histograms": histograms,
         "scatter": scatter,
-        "scoring_note": "等频五分位打分（每档约 20%），R 反向；z-score 标准化后进入 KMeans",
+        "scoring_note": (
+            "等频五分位打分（每档约 20%），R 反向；z-score 标准化后进入 KMeans。"
+            "仅采纳统计日及之前的有效订单：撤销单整笔剔除，退款单只冲减金额，"
+            "统计日之后的迟到单/更正不采纳，同一更正重复投递只生效一次。"
+        ),
     }

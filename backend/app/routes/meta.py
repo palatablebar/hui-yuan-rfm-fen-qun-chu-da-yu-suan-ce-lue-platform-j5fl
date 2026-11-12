@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.constants.cluster_kinds import CLUSTER_KIND_META, CLUSTER_KIND_ORDER
+from app.constants.order_types import ALL_ORDER_TYPES, ORDER_TYPE_META
 from app.constants.roles import ROLE_META, ROLES
 from app.constants.rfm import BUDGET_MAX, BUDGET_MIN, COUPON_TIERS, DEFAULT_BUDGET, K_MAX, K_MIN
 from app.constants.segment_status import SEGMENT_STATUS
@@ -15,6 +16,9 @@ def enums() -> dict:
         "roles": [{"value": role, **ROLE_META[role]} for role in ROLES],
         "segment_status": [{"value": key, "label": label} for key, label in SEGMENT_STATUS.items()],
         "strategy_status": [{"value": key, "label": label} for key, label in STRATEGY_STATUS.items()],
+        "order_types": [
+            {"value": order_type, **ORDER_TYPE_META[order_type]} for order_type in ALL_ORDER_TYPES
+        ],
         "cluster_kinds": [
             {"value": kind, **CLUSTER_KIND_META[kind]} for kind in CLUSTER_KIND_ORDER
         ],
